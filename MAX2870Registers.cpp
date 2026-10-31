@@ -42,21 +42,25 @@ if (s.referenceMHz <= 0 ||
     return false;
   }
 
-  // Расчёт N и FRAC.
-  double nValue = vcoMHz / s.referenceMHz;
 
-  uint32_t n = (uint32_t)nValue;
+// Расчёт N и FRAC.
+double pfdMHz = s.referenceMHz *
+    (s.referenceDoubler ? 2.0 : 1.0) /
+    s.referenceDivider;
+double nValue = vcoMHz / pfdMHz;
 
-  uint32_t frac = (uint32_t)lround(
-    (nValue - n) * s.modulus
-  );
+uint32_t n = (uint32_t)nValue;
 
-  if (frac >= s.modulus) {
-    ++n;
-    frac = 0;
-  }
+uint32_t frac = (uint32_t)lround(
+  (nValue - n) * s.modulus
+);
 
-  bool integerMode = (frac == 0);
+if (frac >= s.modulus) {
+  ++n;
+  frac = 0;
+}
+
+bool integerMode = (frac == 0);
 
   if ((integerMode && (n < 16 || n > 65535)) ||
       (!integerMode && (n < 19 || n > 4091))) {
@@ -69,31 +73,60 @@ if (s.referenceMHz <= 0 ||
     (n << 15) |
     (frac << 3);
 
-  // R1: CPL, PHASE, MOD.
-  r[1] =
-    (integerMode ? 0UL : (1UL << 29)) |
+// R1: CPOC, CPL, PHASE, MOD.
+r[1] =
+    (integerMode ? (1UL << 31) : (1UL << 29)) |
     ((uint32_t)s.phase << 15) |
     ((uint32_t)s.modulus << 3) |
     1UL;
 
-  // R2: базовая конфигурация, CP, MUXOUT, LDF.
-  r[2] = 0x00004042UL;
+    
+// R2: базовая конфигурация
+r[2] = 0x00004042UL;
 
- r[2] &= ~(7UL << 26);
-r[2] |= ((uint32_t)(s.muxOut & 7) << 26);
+// Reference divider R: bits 23:14
+r[2] &= ~(0x3FFUL << 14);
+r[2] |= ((uint32_t)(s.referenceDivider & 0x3FFU) << 14);
 
+// LDP: bit 7
+r[2] &= ~(1UL << 7);
+r[2] |= ((uint32_t)(s.ldp & 1U) << 7);
 
-  r[2] &= ~(0x0FUL << 9);
-  r[2] |= ((uint32_t)s.chargePump << 9);
+// MUXOUT: bits 28:26
+r[2] &= ~(7UL << 26);
+r[2] |= ((uint32_t)(s.muxOut & 7U) << 26);
 
-  if (integerMode) {
-    r[2] |= (1UL << 8);
-  } else {
-    r[2] &= ~(1UL << 8);
-  }
+// Charge Pump: bits 12:9
+r[2] &= ~(0x0FUL << 9);
+r[2] |= ((uint32_t)(s.chargePump & 0x0FU) << 9);
 
+// Reference doubler: R2 bit 25
+if (s.referenceDoubler) {
+  r[2] |= (1UL << 25);
+} else {
+  r[2] &= ~(1UL << 25);
+}
+
+// PFD > 32 MHz: R2 bit 31
+if (pfdMHz > 32.0) {
+  r[2] |= (1UL << 31);
+} else {
+  r[2] &= ~(1UL << 31);
+}
+// LDF: bit 8
+if (integerMode) {
+  r[2] |= (1UL << 8);
+} else {
+  r[2] &= ~(1UL << 8);
+}
   // R3: сохраняем текущую базовую настройку.
-  r[3] = 0x0000000BUL;
+  // R3: базовая конфигурация
+r[3] = 0x0000000BUL;
+
+// RETUNE: bit 24
+if (s.retune) {
+  r[3] |= (1UL << 24);
+}
 
   // R4: BS, FB, DIVA, RFOUTA enable, APWR.
   r[4] =
@@ -118,9 +151,11 @@ r[5] = 0x00400005UL;
 r[5] &= ~(3UL << 22);
 r[5] |= ((uint32_t)(s.ldMode & 0x03) << 22);
 
-  actualFreqMHz =
-    (n + (double)frac / s.modulus) *
-    s.referenceMHz / divider;
+
+
+actualFreqMHz =
+  (n + (double)frac / s.modulus) *
+  pfdMHz / divider;
 
   return true;
 }
