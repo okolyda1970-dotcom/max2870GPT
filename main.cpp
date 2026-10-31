@@ -55,6 +55,92 @@ void writeMAX2870(uint32_t value) {
   digitalWrite(ADF_LE, LOW);
 }
 
+uint32_t readMAX2870Reg6() {
+  uint32_t value = 0;
+
+  // Передаём адрес регистра 6: последние биты 110.
+  digitalWrite(ADF_LE, LOW);
+
+  for (int i = 31; i >= 0; --i) {
+    digitalWrite(ADF_SCK, LOW);
+
+    bool bitValue = (i == 2 || i == 1);
+    digitalWrite(ADF_MOSI, bitValue ? HIGH : LOW);
+
+    delayMicroseconds(1);
+    digitalWrite(ADF_SCK, HIGH);
+    delayMicroseconds(1);
+  }
+
+  // Завершаем команду чтения.
+  digitalWrite(ADF_SCK, LOW);
+  digitalWrite(ADF_LE, HIGH);
+  delayMicroseconds(1);
+
+  // Дополнительный такт запуска выдачи данных.
+  digitalWrite(ADF_SCK, HIGH);
+  delayMicroseconds(1);
+  digitalWrite(ADF_SCK, LOW);
+  delayMicroseconds(1);
+
+  // Считываем 32 бита регистра 6 через MUXOUT.
+  for (int i = 31; i >= 0; --i) {
+    digitalWrite(ADF_SCK, HIGH);
+    delayMicroseconds(1);
+
+    digitalWrite(ADF_SCK, LOW);
+    delayMicroseconds(1);
+
+    value <<= 1;
+    if (digitalRead(MUXOUT_PIN)) {
+      value |= 1UL;
+    }
+  }
+
+  digitalWrite(ADF_LE, LOW);
+  return value;
+}
+
+
+void diagnoseMAX2870() {
+  uint32_t savedR2 = regs[2];
+  uint32_t savedR5 = regs[5];
+
+  // MUX = 1100: чтение регистра 6
+  uint32_t readR2 = savedR2;
+  uint32_t readR5 = savedR5;
+
+  readR2 &= ~(7UL << 26);
+  readR2 |= (4UL << 26);
+
+  readR5 |= (1UL << 18);
+
+  writeMAX2870(readR5);
+  writeMAX2870(readR2);
+
+  delayMicroseconds(10);
+
+  // Три последовательных чтения
+  for (int i = 0; i < 3; i++) {
+    uint32_t r6 = readMAX2870Reg6();
+
+    Serial.printf(
+      "READ%d: REG6=0x%08lX POR=%lu ADC=%lu VCO=%lu\n",
+      i + 1,
+      (unsigned long)r6,
+      (r6 >> 23) & 1UL,
+      (r6 >> 20) & 7UL,
+      (r6 >> 3) & 0x3FUL
+    );
+
+    delay(20);
+  }
+
+  // Восстанавливаем исходные настройки
+  writeMAX2870(savedR5);
+  writeMAX2870(savedR2);
+}
+
 
 static const uint32_t MODULUS = 4095;
 static const uint16_t BAND_SELECT = 500; // 25 MHz / 50 kHz
@@ -65,91 +151,60 @@ bool configureFrequency(double freqMHz) {
     return false;
   }
 
-  // Выбираем делитель так, чтобы VCO работал в диапазоне 3–6 GHz.
-  uint8_t divCode = 0;
-  double divider = 1.0;
-
-  while (freqMHz * divider < 3000.0 && divCode < 7) {
-    divider *= 2.0;
-    ++divCode;
-  }
-
-  const double vcoMHz = freqMHz * divider;
-
-  if (vcoMHz < 3000.0 || vcoMHz > 6000.0) {
+  // Строим все шесть регистров.
+  if (!buildMAX2870Registers(
+        freqMHz,
+        maxSettings,
+        regs,
+        actualFreqMHz)) {
     return false;
   }
 
-  const double nValue = vcoMHz / REF_MHZ;
-  uint32_t n = (uint32_t)nValue;
-  uint32_t frac = (uint32_t)lround(
-      (nValue - n) * MODULUS
-  );
+Serial.printf(
+  "SETTINGS: muxOut=%u ldMode=%u chargePump=%u\n",
+  (unsigned)maxSettings.muxOut,
+  (unsigned)maxSettings.ldMode,
+  (unsigned)maxSettings.chargePump
+);
 
-  if (frac >= MODULUS) {
-    ++n;
-    frac = 0;
+Serial.printf(
+  "BUILT: R2=0x%08lX R5=0x%08lX\n",
+  (unsigned long)regs[2],
+  (unsigned long)regs[5]
+);
+
+  // Первая полная последовательность: R5 -> R0.
+  for (int i = 5; i >= 0; --i) {
+    writeMAX2870(regs[i]);
   }
 
-  const bool integerMode = (frac == 0);
-
-  // Проверяем ограничения N для выбранного режима.
-  if ((integerMode && (n < 16 || n > 65535)) ||
-      (!integerMode && (n < 19 || n > 4091))) {
-    return false;
-  }
-
-if (!buildMAX2870Registers(
-      freqMHz,
-      maxSettings,
-      regs,
-      actualFreqMHz
-    )) {
-  return false;
-}
-
-  // Если RFOUTA был включён, R4 выше уже выключает его.
-  // Порядок записи регистров согласно datasheet.
-  writeMAX2870(regs[5]);
-
+  // После включения питания выдерживаем паузу
+  // между первой и второй полной записью регистров.
   if (!pllInitialized) {
     delay(20);
-  }
 
-  writeMAX2870(regs[4]);
-  writeMAX2870(regs[3]);
-  writeMAX2870(regs[2]);
-  writeMAX2870(regs[1]);
-  writeMAX2870(regs[0]);
+    // Вторая полная последовательность.
+    for (int i = 5; i >= 0; --i) {
+      writeMAX2870(regs[i]);
+    }
 
-  // После первого программирования повторяем последовательность,
-  // чтобы запустить автоматический выбор VCO при старте.
-  if (!pllInitialized) {
-    writeMAX2870(regs[5]);
-    writeMAX2870(regs[4]);
-    writeMAX2870(regs[3]);
-    writeMAX2870(regs[2]);
-    writeMAX2870(regs[1]);
-    writeMAX2870(regs[0]);
     pllInitialized = true;
   }
 
   requestedFreqMHz = freqMHz;
-  actualFreqMHz =
-      (n + (double)frac / MODULUS) * REF_MHZ / divider;
   freqValid = true;
 
-  // Даём PLL время на захват; время окончательного установления
-  // зависит от реального фильтра петли на плате.
-  delay(100);
+  delay(500);
 
-for (int i = 0; i < 6; i++) {
-  char msg[40];
-  snprintf(msg, sizeof(msg), "REG%d=0x%08lX",
-           i, (unsigned long)regs[i]);
-  Serial.println(msg);
-}
-  
+  // Выводим фактически сформированные регистры.
+  for (int i = 0; i < 6; i++) {
+    char msg[40];
+    snprintf(msg, sizeof(msg),
+             "REG%d=0x%08lX",
+             i, (unsigned long)regs[i]);
+    Serial.println(msg);
+  }
+
   return true;
 }
 
@@ -410,16 +465,26 @@ Serial.println("BUILD: TEST-20261024");
 Serial.println("================================");
 delay(500);
 
-maxSettings.chargePump = 12;
+maxSettings.referenceMHz = 25.0;
+maxSettings.modulus = 4095;
+maxSettings.chargePump = 4;
 maxSettings.muxOut = 6;
-maxSettings.rfDivider = 7;
+maxSettings.rfDivider = 2;
 maxSettings.outputPower = 0;
-maxSettings.rfOutputEnable = false;
-maxSettings.ldMode = 3; // Digital Lock Detect
+maxSettings.rfOutputEnable = true;
+maxSettings.outputPower = 2;
+maxSettings.ldMode = 1;
+maxSettings.referenceDivider = 1;
+maxSettings.ldp = 0;
+maxSettings.referenceDoubler = false;
+maxSettings.bandSelect = 500;
+maxSettings.retune = false;
 
-if (configureFrequency(35.0)) {
-  sendStatus("OK:STARTUP_FREQ=35.000000");
-} else {
+//if (configureFrequency(34.9609375)) {
+if (configureFrequency(1125.0)) {
+  delay(100);
+  diagnoseMAX2870();
+}else {
   sendStatus("ERR:STARTUP_FREQ_FAILED");
 }
 }
