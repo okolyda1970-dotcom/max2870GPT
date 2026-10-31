@@ -1,1 +1,133 @@
 
+
+#include <Arduino.h>
+
+#define ADF_SCK     6
+#define ADF_MOSI    7
+#define ADF_LE      3
+#define MUXOUT_PIN  5
+#define LED  10
+
+// Исходные значения из твоей конфигурации
+const uint32_t savedR2 = 0x18004942;
+const uint32_t savedR5 = 0x00400005;
+
+void writeMAX2870(uint32_t value) {
+  digitalWrite(ADF_LE, LOW);
+
+  for (int i = 31; i >= 0; --i) {
+    digitalWrite(ADF_SCK, LOW);
+    digitalWrite(ADF_MOSI, (value >> i) & 1U);
+    delayMicroseconds(1);
+
+    digitalWrite(ADF_SCK, HIGH);
+    delayMicroseconds(1);
+  }
+
+  digitalWrite(ADF_SCK, LOW);
+  digitalWrite(ADF_LE, HIGH);
+  delayMicroseconds(1);
+  digitalWrite(ADF_LE, LOW);
+}
+
+// Чтение 29 информационных бит REG6 (31:3)
+uint32_t readREG6() {
+  // 1. Выбираем MUX = 1100:
+  // R5 bit 18 = 1
+  // R2 bits 28:26 = 100
+
+  uint32_t readR5 = savedR5 | (1UL << 18);
+  uint32_t readR2 =
+      (savedR2 & ~(7UL << 26)) | (4UL << 26);
+
+  writeMAX2870(readR5);
+  writeMAX2870(readR2);
+
+  // 2. Отправляем команду чтения REG6.
+  // 29 произвольных бит + адрес 110.
+
+  digitalWrite(ADF_LE, LOW);
+  digitalWrite(ADF_SCK, LOW);
+
+  for (int i = 31; i >= 0; --i) {
+    uint8_t bitValue = (i < 3) ? ((6 >> i) & 1U) : 0;
+
+    digitalWrite(ADF_MOSI, bitValue);
+    delayMicroseconds(1);
+
+    digitalWrite(ADF_SCK, HIGH);
+    delayMicroseconds(1);
+    digitalWrite(ADF_SCK, LOW);
+    delayMicroseconds(1);
+  }
+
+  // 3. Завершаем команду
+  digitalWrite(ADF_LE, HIGH);
+  delayMicroseconds(1);
+  digitalWrite(ADF_LE, LOW);
+
+  // 4. Дополнительный такт
+  digitalWrite(ADF_SCK, HIGH);
+  delayMicroseconds(1);
+  digitalWrite(ADF_SCK, LOW);
+  delayMicroseconds(1);
+
+  // 5. Считываем 29 бит с MUXOUT
+  uint32_t data = 0;
+
+  for (int i = 0; i < 29; ++i) {
+    digitalWrite(ADF_SCK, HIGH);
+    delayMicroseconds(1);
+
+    digitalWrite(ADF_SCK, LOW);
+    delayMicroseconds(1);
+
+    data = (data << 1) |
+           (digitalRead(MUXOUT_PIN) ? 1U : 0U);
+  }
+
+  // 6. Восстанавливаем исходный MUXOUT
+  writeMAX2870(savedR5);
+  writeMAX2870(savedR2);
+
+  return data;
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(ADF_SCK, OUTPUT);
+  pinMode(ADF_MOSI, OUTPUT);
+  pinMode(ADF_LE, OUTPUT);
+  pinMode(MUXOUT_PIN, INPUT);
+  pinMode(LED, OUTPUT);
+
+  digitalWrite(ADF_SCK, LOW);
+  digitalWrite(ADF_MOSI, LOW);
+  digitalWrite(ADF_LE, LOW);
+
+  delay(500);
+  Serial.println("MAX2870 REG6 test");
+}
+
+void loop() {
+/*   uint32_t data = readREG6();
+
+  // Данные REG6, биты 31:3
+  Serial.printf("REG6[31:3] = 0x%08lX\n",
+                (unsigned long)data);
+
+  // Восстанавливаем 32-битное представление,
+  // включая адрес регистра 6
+  uint32_t reg6 = (data << 3) | 6U;
+
+  Serial.printf("REG6        = 0x%08lX\n",
+                (unsigned long)reg6);
+
+  Serial.println("--------------------"); */
+  
+ digitalWrite(LED, LOW);
+  delay(200);
+   digitalWrite(LED, HIGH);
+    delay(300);
+}
